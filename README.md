@@ -33,31 +33,11 @@ The value is in the **architecture pattern**: separating what scripts should do 
 
 Using an LLM to extract text from a PDF is like hiring a Michelin-star chef to wash vegetables. The chef's talent is wasted, and the vegetables don't come out any cleaner. Scripts handle extraction; the LLM handles decisions.
 
+Every format degrades gracefully — PDFs try text extraction first, then OCR, then signal the LLM to use its own vision. No dependency is truly required; the pipeline always produces *something*.
+
 This separation saves ~74% of token cost compared to feeding raw files directly to the LLM.
 
 ## How it works
-
-```
-                    ┌──────────────┐
-  file.pdf ────────>│              │──> _staging/01_file.txt
-  page.html ───────>│  ingest.sh   │──> _staging/02_page.txt
-  https://... ─────>│              │──> _staging/03_url.txt
-  photo.png ───────>│  extractors/ │──> _staging/04_photo.needs-visual
-                    └──────┬───────┘
-                           │
-                           v
-                    _staging/_manifest.md
-                    (filenames + previews + target index)
-                           │
-                           v
-                    LLM reads manifest ──> routing decision
-                           │
-                           v
-                    LLM reads staging files one by one
-                           │
-                           v
-                    Integrated into target directory
-```
 
 **Three layers, each doing what it's best at:**
 
@@ -69,42 +49,21 @@ This separation saves ~74% of token cost compared to feeding raw files directly 
 
 ## Install
 
-**1. Clone**
-
 ```bash
-git clone https://github.com/huanxiong-hi/ingest.git
-cd ingest
-```
-
-**2. Symlink the CLI**
-
-```bash
+git clone https://github.com/huanxiong-hi/ingest.git && cd ingest
 mkdir -p ~/.local/bin
 ln -sf "$(pwd)/scripts/ingest.sh" ~/.local/bin/ingest
+brew install poppler tesseract pandoc  # core deps (optional, graceful fallback)
 ```
 
-Make sure `~/.local/bin` is in your `PATH`. Add to your shell profile if needed:
+Make sure `~/.local/bin` is in your `PATH`. Add to your shell profile if needed: `export PATH="$HOME/.local/bin:$PATH"`
+
+Optional dependencies:
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-**3. Install dependencies**
-
-Most extractors have graceful fallbacks, so only install what you need:
-
-```bash
-# macOS — core (recommended)
-brew install poppler tesseract pandoc
-
-# macOS — optional: Chinese OCR support
-brew install tesseract-lang
-
-# macOS — optional: best web extraction
-npm install -g @nicepkg/readability-cli
-
-# macOS — optional: video transcription
-pip install openai-whisper
+brew install tesseract-lang          # Chinese OCR support
+npm install -g @nicepkg/readability-cli  # best web extraction
+pip install openai-whisper           # video transcription
 ```
 
 ## Usage
@@ -138,31 +97,19 @@ _staging/
 
 ## Supported formats
 
-| Format | Extractor | Fallback chain | Dependencies |
-|--------|-----------|---------------|--------------|
-| `.pdf` | pdftotext → tesseract OCR → LLM visual read | 3 layers, always works | `poppler` (optional), `tesseract` (optional) |
-| `.doc` `.docx` `.rtf` | textutil | macOS built-in, no fallback needed | None |
-| `.html` | pandoc → textutil | 2 layers | `pandoc` (optional) |
-| `.md` | cat (pass-through) | N/A | None |
-| `.png` `.jpg` `.jpeg` `.webp` `.tiff` `.bmp` | tesseract OCR → LLM visual read | 2 layers | `tesseract` (optional) |
-| URL (`https://...`) | readability-cli → pandoc → curl + HTML strip | 3 layers | `readability-cli` (optional) |
-| `.mp4` | whisper (OpenAI or whisper.cpp) | No fallback | `openai-whisper` or `whisper-cpp` |
-
-**Fallback philosophy:** Every format degrades gracefully. PDFs try text extraction first, then OCR, then signal the LLM to use its own vision. No dependency is truly required — the pipeline always produces *something*.
-
-## Adapting to your setup
-
-| Scenario | What to change |
-|----------|----------------|
-| **Linux** | Replace `textutil` calls in `doc.sh`, `docx.sh`, `rtf.sh` with `libreoffice --headless --convert-to txt` or `pandoc` |
-| **Cursor / other AI editor** | Use `ingest` as a terminal command; paste `_manifest.md` content into chat for routing |
-| **Non-Obsidian vault** | Works anywhere — Obsidian is not a dependency. Just point `--target` at any directory |
-| **Different LLM** | The manifest is plain Markdown — any LLM can parse it |
-| **CI/CD pipeline** | Run `ingest` in a pre-processing step; feed manifest to downstream LLM calls |
+| Format | Dependencies |
+|--------|-------------|
+| `.pdf` | `poppler` (optional), `tesseract` (optional) |
+| `.doc` `.docx` `.rtf` | None (macOS built-in) |
+| `.html` | `pandoc` (optional) |
+| `.md` | None |
+| `.png` `.jpg` `.jpeg` `.webp` `.tiff` `.bmp` | `tesseract` (optional) |
+| URL (`https://...`) | `readability-cli` (optional) |
+| `.mp4` | `openai-whisper` or `whisper-cpp` |
 
 ## Writing a custom extractor
 
-Each extractor is a standalone shell script in `scripts/extractors/`. The interface is simple:
+Each extractor is a standalone shell script in `scripts/extractors/`. Drop a `.sh` file, and the filename becomes the supported extension — no registration, no config.
 
 ```bash
 # scripts/extractors/epub.sh
@@ -170,19 +117,7 @@ Each extractor is a standalone shell script in `scripts/extractors/`. The interf
 pandoc -f epub -t plain "$1"
 ```
 
-**Contract:**
-
-| Item | Spec |
-|------|------|
-| Input | `$1` = file path (or URL for `web.sh`) |
-| Output | Plain text to `stdout` |
-| Exit 0 | Text extracted successfully |
-| Exit 2 | Needs LLM visual read — output `[NEEDS_VISUAL_READ] /absolute/path` and optionally `[PAGES] N` |
-| Exit 1 | Error (file skipped) |
-
-To add a new format, just drop a `.sh` file in `scripts/extractors/`. The filename becomes the supported extension. No registration, no config — `ingest` discovers extractors automatically.
-
-To remove a format, delete its extractor file.
+To remove a format, delete its extractor file. Linux users: replace `textutil` with `pandoc` or `libreoffice` in the relevant extractors.
 
 ## Working with Claude Code
 
@@ -195,9 +130,7 @@ The scripts handle extraction, but the real workflow lives in `CLAUDE.md` — a 
 5. **Integrate** — Process staging files one at a time, formatting to match the target project
 6. **Clean up** — `rm -rf _staging/` after confirmation
 
-The `CLAUDE.md` file also enforces guardrails: no loading multiple staging files at once (let context compression do its job), no using Agent subprocesses to shuttle large text (2x token waste), no reading binaries directly (always extract first).
-
-You can adapt the `CLAUDE.md` to your own workflow — it's the control layer that makes the pipeline useful, not just functional.
+**Guardrails** — The `CLAUDE.md` enforces three rules to keep token costs low: no loading multiple staging files at once (let context compression release completed work), no Agent subprocesses to shuttle large text (2x token waste), no reading binaries directly (always extract first). Adapt the `CLAUDE.md` to your own workflow — it's the control layer that makes the pipeline useful, not just functional.
 
 ## License
 
